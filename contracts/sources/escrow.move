@@ -86,6 +86,11 @@ public struct ArbiterResolved has copy, drop {
     released: bool,
 }
 
+public struct EscrowDestroyed has copy, drop {
+    escrow_id: ID,
+    destroyed_by: address,
+}
+
 // === Core Struct ===
 
 /// Single-direction asset escrow with mutual-confirm, timelock-refund, and arbiter-resolve.
@@ -227,10 +232,9 @@ public fun arbiter_resolve<T: key + store>(
     assert!(sender == escrow.arbiter, ENotAuthorized);
     assert!(escrow.state == STATE_DISPUTED, EInvalidState);
 
-    let item = escrow.item.extract();
-
     if (release) {
         escrow.state = STATE_RELEASED;
+        let item = escrow.item.extract();
         transfer::public_transfer(item, escrow.recipient);
         event::emit(EscrowReleased {
             escrow_id: escrow.id.to_inner(),
@@ -238,6 +242,7 @@ public fun arbiter_resolve<T: key + store>(
         });
     } else {
         escrow.state = STATE_REFUNDED;
+        let item = escrow.item.extract();
         transfer::public_transfer(item, escrow.creator);
         event::emit(EscrowRefunded {
             escrow_id: escrow.id.to_inner(),
@@ -297,6 +302,7 @@ public fun reject<T: key + store>(
     let sender = ctx.sender();
     assert!(sender == escrow.recipient, ENotAuthorized);
     assert!(escrow.state == STATE_ACTIVE, EInvalidState);
+    assert!(!escrow.recipient_confirmed, EAlreadyConfirmed);
 
     escrow.state = STATE_REFUNDED;
     let item = escrow.item.extract();
@@ -309,13 +315,37 @@ public fun reject<T: key + store>(
 
 /// Destroy a terminal-state Escrow, recovering on-chain storage.
 /// Callable by anyone; state must be Released or Refunded (item already extracted).
-public fun destroy<T: key + store>(escrow: Escrow<T>) {
+public fun destroy<T: key + store>(escrow: Escrow<T>, ctx: &TxContext) {
     assert!(
         escrow.state == STATE_RELEASED || escrow.state == STATE_REFUNDED,
         EInvalidState,
     );
-    let Escrow { id, item, .. } = escrow;
+
+    let escrow_id = escrow.id.to_inner();
+    let destroyed_by = ctx.sender();
+
+    let Escrow {
+        id,
+        creator: _,
+        recipient: _,
+        arbiter: _,
+        item,
+        description: _,
+        state: _,
+        created_at: _,
+        timeout_ms: _,
+        creator_confirmed: _,
+        recipient_confirmed: _,
+        disputed_at: _,
+    } = escrow;
+
     item.destroy_none();
+
+    event::emit(EscrowDestroyed {
+        escrow_id,
+        destroyed_by,
+    });
+
     id.delete();
 }
 
@@ -935,7 +965,7 @@ fun test_destroy_released() {
     scenario.next_tx(CREATOR);
     {
         let escrow = scenario.take_shared<Escrow<TestItem>>();
-        destroy(escrow);
+        destroy(escrow, scenario.ctx());
     };
 
     // Clean up transferred item
@@ -970,7 +1000,7 @@ fun test_destroy_refunded() {
     scenario.next_tx(CREATOR);
     {
         let escrow = scenario.take_shared<Escrow<TestItem>>();
-        destroy(escrow);
+        destroy(escrow, scenario.ctx());
     };
 
     // Clean up refunded item
@@ -996,7 +1026,7 @@ fun test_destroy_active_fails() {
     scenario.next_tx(CREATOR);
     {
         let escrow = scenario.take_shared<Escrow<TestItem>>();
-        destroy(escrow);
+        destroy(escrow, scenario.ctx());
     };
 
     clock.destroy_for_testing();
@@ -1024,7 +1054,7 @@ fun test_destroy_disputed_fails() {
     scenario.next_tx(CREATOR);
     {
         let escrow = scenario.take_shared<Escrow<TestItem>>();
-        destroy(escrow);
+        destroy(escrow, scenario.ctx());
     };
 
     clock.destroy_for_testing();
@@ -1276,6 +1306,35 @@ fun test_error_reject_wrong_state() {
     };
 
     // Recipient tries to reject in Disputed state
+    scenario.next_tx(RECIPIENT);
+    {
+        let mut escrow = scenario.take_shared<Escrow<TestItem>>();
+        reject(&mut escrow, scenario.ctx());
+        test_scenario::return_shared(escrow);
+    };
+
+    clock.destroy_for_testing();
+    scenario.end();
+}
+
+// ----- 17d. Error: reject after confirmed -----
+
+#[test]
+#[expected_failure(abort_code = EAlreadyConfirmed)]
+fun test_error_reject_after_confirmed() {
+    let mut scenario = test_scenario::begin(CREATOR);
+    let clock = sui::clock::create_for_testing(scenario.ctx());
+    create_default_escrow(&clock, scenario.ctx());
+
+    // Recipient confirms
+    scenario.next_tx(RECIPIENT);
+    {
+        let mut escrow = scenario.take_shared<Escrow<TestItem>>();
+        confirm(&mut escrow, scenario.ctx());
+        test_scenario::return_shared(escrow);
+    };
+
+    // Recipient tries to reject after confirming → blocked
     scenario.next_tx(RECIPIENT);
     {
         let mut escrow = scenario.take_shared<Escrow<TestItem>>();

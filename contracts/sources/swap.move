@@ -103,7 +103,7 @@ public fun create_swap<T: key + store, U: key + store>(
     assert!(description.length() <= MAX_DESCRIPTION_LEN, EDescriptionTooLong);
 
     let uid = object::new(ctx);
-    let swap_id = object::uid_to_inner(&uid);
+    let swap_id = uid.to_inner();
     let created_at = clock.timestamp_ms();
 
     let swap = Swap<T, U> {
@@ -117,8 +117,6 @@ public fun create_swap<T: key + store, U: key + store>(
         timeout_ms,
     };
 
-    transfer::share_object(swap);
-
     event::emit(SwapCreated {
         swap_id,
         creator,
@@ -127,6 +125,8 @@ public fun create_swap<T: key + store, U: key + store>(
         timeout_ms,
         created_at,
     });
+
+    transfer::share_object(swap);
 }
 
 /// B accepts the swap: deposits item_b of type U, atomically receives item_a of type T.
@@ -141,14 +141,14 @@ public fun execute_swap<T: key + store, U: key + store>(
     assert!(swap.state == STATE_PENDING, EInvalidState);
     assert!(ctx.sender() == swap.recipient, ENotAuthorized);
 
+    swap.state = STATE_EXECUTED;
+
     let item_a = swap.item_a.extract();
     transfer::public_transfer(item_a, swap.recipient);
     transfer::public_transfer(item_b, swap.creator);
 
-    swap.state = STATE_EXECUTED;
-
     event::emit(SwapExecuted {
-        swap_id: object::id(swap),
+        swap_id: swap.id.to_inner(),
         creator: swap.creator,
         recipient: swap.recipient,
     });
@@ -167,13 +167,13 @@ public fun cancel_swap<T: key + store, U: key + store>(
         ETimeoutNotReached,
     );
 
+    swap.state = STATE_CANCELLED;
+
     let item_a = swap.item_a.extract();
     transfer::public_transfer(item_a, swap.creator);
 
-    swap.state = STATE_CANCELLED;
-
     event::emit(SwapCancelled {
-        swap_id: object::id(swap),
+        swap_id: swap.id.to_inner(),
         creator: swap.creator,
     });
 }
@@ -189,7 +189,7 @@ public fun destroy_swap<T: key + store, U: key + store>(
         EInvalidState,
     );
 
-    let swap_id = object::id(&swap);
+    let swap_id = swap.id.to_inner();
     let destroyed_by = ctx.sender();
 
     let Swap {
@@ -216,7 +216,7 @@ public fun destroy_swap<T: key + store, U: key + store>(
 // === View Functions ===
 
 public fun swap_id<T: key + store, U: key + store>(swap: &Swap<T, U>): ID {
-    object::id(swap)
+    swap.id.to_inner()
 }
 
 public fun creator<T: key + store, U: key + store>(swap: &Swap<T, U>): address {
@@ -241,6 +241,10 @@ public fun created_at<T: key + store, U: key + store>(swap: &Swap<T, U>): u64 {
 
 public fun timeout_ms<T: key + store, U: key + store>(swap: &Swap<T, U>): u64 {
     swap.timeout_ms
+}
+
+public fun has_item_a<T: key + store, U: key + store>(swap: &Swap<T, U>): bool {
+    swap.item_a.is_some()
 }
 
 // === Test Helpers ===

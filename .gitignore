@@ -54,3 +54,4 @@ review_agent.md
 .trash_do_not_read
 .cursor
 contracts/build
+.pnpm-store

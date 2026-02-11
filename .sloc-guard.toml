@@ -1,0 +1,50 @@
+# More config: https://github.com/doraemonkeys/sloc-guard
+version = "2"
+
+[scanner]
+gitignore = true
+exclude = ["**/.git/**", "**/build/**", "**/dist/**", "**/node_modules/**"]
+
+[content]
+extensions = ["move", "ts", "tsx", "css"]
+max_lines = 500
+warn_threshold = 0.9
+skip_comments = true
+skip_blank = true
+
+# Per-subdirectory rules
+
+# Move contracts — domain logic tends to be dense
+[[content.rules]]
+pattern = "contracts/**/*.move"
+max_lines = 1600
+warn_at = 1500
+
+# React components — keep small and composable
+[[content.rules]]
+pattern = "frontend/**/components/**"
+max_lines = 300
+warn_at = 250
+
+# Pages — may orchestrate multiple components
+[[content.rules]]
+pattern = "frontend/**/pages/**"
+max_lines = 400
+warn_at = 350
+
+# Hooks
+[[content.rules]]
+pattern = "frontend/**/hooks/**"
+max_lines = 300
+warn_at = 250
+
+# Test files — relaxed limits
+[[content.rules]]
+pattern = "frontend/**/*.test.*"
+max_lines = 800
+warn_at = 600
+
+[structure]
+max_files = 40
+max_dirs = 15
+count_exclude = ["*.test.*", "*.spec.*", "tmpclaude-*"]
