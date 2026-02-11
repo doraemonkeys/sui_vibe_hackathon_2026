@@ -1,5 +1,5 @@
-/** Update after contract deployment to testnet */
-export const PACKAGE_ID = '0xTODO';
+export const PACKAGE_ID =
+  '0xeb07c23fc18e231f4632e812961b939f3fd788dbae887e2470d8697a191085b6';
 
 /** Sui shared Clock object */
 export const CLOCK_ID = '0x6';

@@ -2,21 +2,37 @@
 
 /*
  * Gavel Design Tokens
- * Light & Energetic theme — see docs/plan_frontend.md for rationale.
+ * Light & Energetic theme — see docs/plan_frontend.md §Color System.
  */
 
+/* ━━ Gradient Custom Properties ━━
+ * Gradients can't be registered as Tailwind color tokens,
+ * so they live as plain CSS variables for var() usage.
+ */
+:root {
+  --gradient-primary: linear-gradient(135deg, #5b8cff, #8a6bff, #ff6fb5);
+  --gradient-swap: linear-gradient(135deg, #22c7a9, #4da4ff);
+  --gradient-escrow: linear-gradient(135deg, #ffb347, #ff6b6b);
+}
+
+/* ━━ Tailwind v4 Theme Extension ━━
+ * Tokens registered here become both CSS variables and utility classes.
+ * Naming: strip context prefix where it duplicates the utility
+ * (--color-surface → bg-surface), keep it where two "primary" hues
+ * exist for different roles (--color-bg-primary vs --color-text-primary).
+ */
 @theme {
   /* ── Typography ── */
   --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
   --font-display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'Space Grotesk', ui-monospace, monospace;
 
-  /* ── Core Palette (Light) ── */
-  --color-bg-primary: #f6f8ff;
-  --color-bg-surface: #ffffff;
-  --color-bg-surface-soft: #eef3ff;
-  --color-bg-card-hover: #f8faff;
-  --color-border-subtle: #dce4f5;
+  /* ── Core Palette ─────────────────────────── utility examples ── */
+  --color-bg-primary: #f6f8ff; /*             bg-bg-primary         */
+  --color-surface: #ffffff; /*                bg-surface             */
+  --color-surface-soft: #eef3ff; /*           bg-surface-soft        */
+  --color-card-hover: #f8faff; /*             bg-card-hover          */
+  --color-subtle: #dce4f5; /*                 border-subtle          */
 
   /* ── Semantic Colors ── */
   --color-success: #16a34a;
@@ -25,34 +41,75 @@
   --color-neutral: #64748b;
   --color-info: #4f46e5;
 
-  /* ── Text ── */
-  --color-text-primary: #1f2a44;
-  --color-text-secondary: #4b5a78;
-  --color-text-muted: #7c89a3;
+  /* ── Text Hierarchy ── */
+  --color-text-primary: #1f2a44; /*           text-text-primary      */
+  --color-text-secondary: #4b5a78; /*         text-text-secondary    */
+  --color-muted: #7c89a3; /*                  text-muted             */
+
+  /* ── Animation ── */
+  --animate-status-pulse: status-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
-/* ── Base Styles ── */
+/* ━━ Base Styles ━━ */
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   font-family: var(--font-sans);
   color: var(--color-text-primary);
   background-color: var(--color-bg-primary);
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* ── Gradient Utilities (not expressible in @theme) ── */
+/* Space Grotesk on headings — tech-forward personality, warm on light bg */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-display);
+}
+
+/* ━━ Gradient Utilities (not expressible as Tailwind color tokens) ━━ */
 .gradient-primary {
-  background: linear-gradient(135deg, #5b8cff, #8a6bff, #ff6fb5);
+  background: var(--gradient-primary);
 }
 .gradient-swap {
-  background: linear-gradient(135deg, #22c7a9, #4da4ff);
+  background: var(--gradient-swap);
 }
 .gradient-escrow {
-  background: linear-gradient(135deg, #ffb347, #ff6b6b);
+  background: var(--gradient-escrow);
 }
+
+/* Gradient text fill for hero headings */
 .gradient-text {
-  background: linear-gradient(135deg, #5b8cff, #8a6bff, #ff6fb5);
+  background: var(--gradient-primary);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* ━━ Glassmorphism Backdrop (Navbar / floating panels) ━━ */
+.glass {
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--color-subtle);
+}
+
+/* ━━ Status Dot Pulse (Active / Pending indicators) ━━ */
+@keyframes status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.85);
+  }
 }
