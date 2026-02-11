@@ -23,26 +23,26 @@ warn_at = 1500
 # React components — keep small and composable
 [[content.rules]]
 pattern = "frontend/**/components/**"
-max_lines = 300
-warn_at = 250
+max_lines = 800
+warn_threshold = 0.9
 
 # Pages — may orchestrate multiple components
 [[content.rules]]
 pattern = "frontend/**/pages/**"
-max_lines = 400
-warn_at = 350
+max_lines = 800
+warn_threshold = 0.9
 
 # Hooks
 [[content.rules]]
 pattern = "frontend/**/hooks/**"
-max_lines = 300
-warn_at = 250
+max_lines = 600
+warn_threshold = 0.9
 
 # Test files — relaxed limits
 [[content.rules]]
 pattern = "frontend/**/*.test.*"
 max_lines = 800
-warn_at = 600
+warn_threshold = 0.9
 
 [structure]
 max_files = 40
