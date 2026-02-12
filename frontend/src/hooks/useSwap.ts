@@ -143,11 +143,7 @@ function parseSwapJson(
  * Reconstruct a minimal SwapObject from the creation event when the
  * on-chain object has already been destroyed.
  */
-function swapFromCreationEvent(
-  swapId: string,
-  ev: RpcEvent,
-  state: number,
-): SwapObject {
+function swapFromCreationEvent(swapId: string, ev: RpcEvent, state: number): SwapObject {
   const pj = ev.parsedJson;
   return {
     id: swapId,
@@ -274,9 +270,7 @@ export function useExecuteSwap() {
       try {
         const tx = new Transaction();
 
-        const [payment] = tx.splitCoins(tx.gas, [
-          tx.pure.u64(params.paymentAmount),
-        ]);
+        const [payment] = tx.splitCoins(tx.gas, [tx.pure.u64(params.paymentAmount)]);
 
         tx.moveCall({
           target: `${SWAP_MODULE}::execute_swap`,
@@ -406,9 +400,7 @@ export function useMySwaps(address: string | undefined) {
       const createdEvents = await rpcQueryAllEvents(EVENT_TYPES.created);
 
       const mine = createdEvents.filter(
-        (ev) =>
-          ev.parsedJson.creator === address ||
-          ev.parsedJson.recipient === address,
+        (ev) => ev.parsedJson.creator === address || ev.parsedJson.recipient === address,
       );
 
       if (mine.length === 0) {
@@ -416,9 +408,7 @@ export function useMySwaps(address: string | undefined) {
         return;
       }
 
-      const swapIds = [
-        ...new Set(mine.map((ev) => ev.parsedJson.swap_id as string)),
-      ];
+      const swapIds = [...new Set(mine.map((ev) => ev.parsedJson.swap_id as string))];
 
       // Batch-fetch live objects via gRPC
       const objectsRes = await client.getObjects({
@@ -431,12 +421,8 @@ export function useMySwaps(address: string | undefined) {
         rpcQueryAllEvents(EVENT_TYPES.executed),
         rpcQueryAllEvents(EVENT_TYPES.cancelled),
       ]);
-      const executedIds = new Set(
-        executedEvs.map((e) => e.parsedJson.swap_id as string),
-      );
-      const cancelledIds = new Set(
-        cancelledEvs.map((e) => e.parsedJson.swap_id as string),
-      );
+      const executedIds = new Set(executedEvs.map((e) => e.parsedJson.swap_id as string));
+      const cancelledIds = new Set(cancelledEvs.map((e) => e.parsedJson.swap_id as string));
 
       const swaps: SwapObject[] = [];
       for (let i = 0; i < swapIds.length; i++) {
@@ -448,21 +434,13 @@ export function useMySwaps(address: string | undefined) {
           const ev = mine.find((e) => e.parsedJson.swap_id === id);
           if (ev) {
             swaps.push(
-              swapFromCreationEvent(
-                id,
-                ev,
-                inferTerminalState(id, executedIds, cancelledIds),
-              ),
+              swapFromCreationEvent(id, ev, inferTerminalState(id, executedIds, cancelledIds)),
             );
           }
           continue;
         }
 
-        const parsed = parseSwapJson(
-          obj.objectId,
-          obj.type,
-          obj.json ?? null,
-        );
+        const parsed = parseSwapJson(obj.objectId, obj.type, obj.json ?? null);
         if (parsed) swaps.push(parsed);
       }
 
@@ -506,9 +484,7 @@ export function useSwapDetail(swapId: string | undefined) {
     setError(null);
     try {
       // Collect all event types for this swap ID
-      const allEvs = (
-        await Promise.all(Object.values(EVENT_TYPES).map(rpcQueryAllEvents))
-      ).flat();
+      const allEvs = (await Promise.all(Object.values(EVENT_TYPES).map(rpcQueryAllEvents))).flat();
 
       const related = allEvs
         .filter((ev) => ev.parsedJson.swap_id === swapId)
@@ -523,23 +499,13 @@ export function useSwapDetail(swapId: string | undefined) {
           objectId: swapId,
           include: { json: true },
         });
-        swap = parseSwapJson(
-          res.object.objectId,
-          res.object.type,
-          res.object.json ?? null,
-        );
+        swap = parseSwapJson(res.object.objectId, res.object.type, res.object.json ?? null);
       } catch {
         // Object destroyed — fall back to event reconstruction
-        const creationEv = related.find((ev) =>
-          ev.type.endsWith('::SwapCreated'),
-        );
+        const creationEv = related.find((ev) => ev.type.endsWith('::SwapCreated'));
         if (creationEv) {
-          const hasExecuted = related.some((ev) =>
-            ev.type.endsWith('::SwapExecuted'),
-          );
-          const hasCancelled = related.some((ev) =>
-            ev.type.endsWith('::SwapCancelled'),
-          );
+          const hasExecuted = related.some((ev) => ev.type.endsWith('::SwapExecuted'));
+          const hasCancelled = related.some((ev) => ev.type.endsWith('::SwapCancelled'));
           let state = SWAP_STATE_PENDING;
           if (hasExecuted) state = SWAP_STATE_EXECUTED;
           else if (hasCancelled) state = SWAP_STATE_CANCELLED;

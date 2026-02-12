@@ -88,9 +88,7 @@ export function extractTypeParams(typeStr: string): string[] {
  * // → { kind: 'object_swap', itemType: '0x…::nft::A', counterItemType: '0x…::nft::B' }
  * ```
  */
-export function parseSwapTypeArgs(
-  typeString: string,
-): ParsedSwapTypeArgs | null {
+export function parseSwapTypeArgs(typeString: string): ParsedSwapTypeArgs | null {
   const params = extractTypeParams(typeString);
   if (params.length < 2) return null;
 

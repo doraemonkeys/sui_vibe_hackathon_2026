@@ -143,8 +143,7 @@ function parseObjectSwapJson(
   json: Record<string, unknown> | null,
 ): ObjectSwapObject | null {
   if (!json) return null;
-  const [itemType = '', counterItemType = ''] =
-    extractTypeParams(objectType);
+  const [itemType = '', counterItemType = ''] = extractTypeParams(objectType);
 
   return {
     id: objectId,
@@ -249,11 +248,7 @@ export function useCreateObjectSwap() {
           arguments: [
             tx.object(params.itemObjectId),
             tx.pure.address(params.recipient),
-            tx.pure(
-              bcs
-                .option(bcs.Address)
-                .serialize(params.requestedObjectId ?? null),
-            ),
+            tx.pure(bcs.option(bcs.Address).serialize(params.requestedObjectId ?? null)),
             tx.pure.string(params.description),
             tx.pure.u64(params.timeoutMs),
             tx.object(CLOCK_ID),
@@ -306,10 +301,7 @@ export function useExecuteObjectSwap() {
         tx.moveCall({
           target: `${OBJECT_SWAP_MODULE}::execute_object_swap`,
           typeArguments: [params.creatorItemType, params.counterItemType],
-          arguments: [
-            tx.object(params.swapObjectId),
-            tx.object(params.itemBObjectId),
-          ],
+          arguments: [tx.object(params.swapObjectId), tx.object(params.itemBObjectId)],
         });
 
         await dAppKit.signAndExecuteTransaction({ transaction: tx });
@@ -431,9 +423,7 @@ export function useMyObjectSwaps(address: string | undefined) {
       const createdEvents = await rpcQueryAllEvents(EVENT_TYPES.created);
 
       const mine = createdEvents.filter(
-        (ev) =>
-          ev.parsedJson.creator === address ||
-          ev.parsedJson.recipient === address,
+        (ev) => ev.parsedJson.creator === address || ev.parsedJson.recipient === address,
       );
 
       if (mine.length === 0) {
@@ -441,9 +431,7 @@ export function useMyObjectSwaps(address: string | undefined) {
         return;
       }
 
-      const swapIds = [
-        ...new Set(mine.map((ev) => ev.parsedJson.swap_id as string)),
-      ];
+      const swapIds = [...new Set(mine.map((ev) => ev.parsedJson.swap_id as string))];
 
       // Batch-fetch live objects via gRPC
       const objectsRes = await client.getObjects({
@@ -456,12 +444,8 @@ export function useMyObjectSwaps(address: string | undefined) {
         rpcQueryAllEvents(EVENT_TYPES.executed),
         rpcQueryAllEvents(EVENT_TYPES.cancelled),
       ]);
-      const executedIds = new Set(
-        executedEvs.map((e) => e.parsedJson.swap_id as string),
-      );
-      const cancelledIds = new Set(
-        cancelledEvs.map((e) => e.parsedJson.swap_id as string),
-      );
+      const executedIds = new Set(executedEvs.map((e) => e.parsedJson.swap_id as string));
+      const cancelledIds = new Set(cancelledEvs.map((e) => e.parsedJson.swap_id as string));
 
       const swaps: ObjectSwapObject[] = [];
       for (let i = 0; i < swapIds.length; i++) {
@@ -483,11 +467,7 @@ export function useMyObjectSwaps(address: string | undefined) {
           continue;
         }
 
-        const parsed = parseObjectSwapJson(
-          obj.objectId,
-          obj.type,
-          obj.json ?? null,
-        );
+        const parsed = parseObjectSwapJson(obj.objectId, obj.type, obj.json ?? null);
         if (parsed) swaps.push(parsed);
       }
 
@@ -529,9 +509,7 @@ export function useObjectSwapDetail(swapId: string | undefined) {
     setError(null);
     try {
       // Collect all event types for this swap ID
-      const allEvs = (
-        await Promise.all(Object.values(EVENT_TYPES).map(rpcQueryAllEvents))
-      ).flat();
+      const allEvs = (await Promise.all(Object.values(EVENT_TYPES).map(rpcQueryAllEvents))).flat();
 
       const related = allEvs
         .filter((ev) => ev.parsedJson.swap_id === swapId)
@@ -546,23 +524,13 @@ export function useObjectSwapDetail(swapId: string | undefined) {
           objectId: swapId,
           include: { json: true },
         });
-        swap = parseObjectSwapJson(
-          res.object.objectId,
-          res.object.type,
-          res.object.json ?? null,
-        );
+        swap = parseObjectSwapJson(res.object.objectId, res.object.type, res.object.json ?? null);
       } catch {
         // Object destroyed — fall back to event reconstruction
-        const creationEv = related.find((ev) =>
-          ev.type.endsWith('::ObjectSwapCreated'),
-        );
+        const creationEv = related.find((ev) => ev.type.endsWith('::ObjectSwapCreated'));
         if (creationEv) {
-          const hasExecuted = related.some((ev) =>
-            ev.type.endsWith('::ObjectSwapExecuted'),
-          );
-          const hasCancelled = related.some((ev) =>
-            ev.type.endsWith('::ObjectSwapCancelled'),
-          );
+          const hasExecuted = related.some((ev) => ev.type.endsWith('::ObjectSwapExecuted'));
+          const hasCancelled = related.some((ev) => ev.type.endsWith('::ObjectSwapCancelled'));
           let state = SWAP_STATE_PENDING;
           if (hasExecuted) state = SWAP_STATE_EXECUTED;
           else if (hasCancelled) state = SWAP_STATE_CANCELLED;
