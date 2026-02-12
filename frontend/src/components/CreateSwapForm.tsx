@@ -225,7 +225,7 @@ export default function CreateSwapForm() {
   const [selectedAsset, setSelectedAsset] = useState<SelectedAsset | null>(null);
 
   // Coin-mode fields
-  const [coinType, setCoinType] = useState(COIN_OPTIONS[0].value);
+  const [coinType, setCoinType] = useState<string>(COIN_OPTIONS[0].value);
   const [requestedAmount, setRequestedAmount] = useState('');
 
   // Object-mode fields
