@@ -1,5 +1,8 @@
 /**
- * Swap contract interaction hooks.
+ * ObjectSwap contract interaction hooks.
+ *
+ * Mirrors the structure of useSwap.ts but targets the `gavel::object_swap`
+ * module for NFT-for-NFT exchanges with optional exact Object ID matching.
  *
  * Transaction hooks use useDAppKit() for signing.
  * Data-fetching hooks use useCurrentClient() for object queries and
@@ -10,6 +13,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Transaction } from '@mysten/sui/transactions';
+import { bcs } from '@mysten/sui/bcs';
 import { useDAppKit, useCurrentClient } from '@mysten/dapp-kit-react';
 import {
   PACKAGE_ID,
@@ -18,27 +22,29 @@ import {
   SWAP_STATE_EXECUTED,
   SWAP_STATE_CANCELLED,
 } from '../constants';
-import type { SwapObject, ChainEvent } from '../types';
+import type { ObjectSwapObject, ChainEvent } from '../types';
 import { extractTypeParams } from '../utils/parseSwapTypeArgs';
 
 // ── Module constants ────────────────────────────────────────────────
 
-const SWAP_MODULE = `${PACKAGE_ID}::swap`;
+const OBJECT_SWAP_MODULE = `${PACKAGE_ID}::object_swap`;
 
 /**
  * Sui testnet JSON-RPC endpoint.
- * Used exclusively for event queries that the gRPC transport cannot serve.
+ * Duplicated from useSwap.ts — shared extraction deferred to avoid
+ * modifying existing files in this changeset.
  */
 const JSON_RPC_URL = 'https://fullnode.testnet.sui.io:443';
 
 const EVENT_TYPES = {
-  created: `${SWAP_MODULE}::SwapCreated`,
-  executed: `${SWAP_MODULE}::SwapExecuted`,
-  cancelled: `${SWAP_MODULE}::SwapCancelled`,
-  destroyed: `${SWAP_MODULE}::SwapDestroyed`,
+  created: `${OBJECT_SWAP_MODULE}::ObjectSwapCreated`,
+  executed: `${OBJECT_SWAP_MODULE}::ObjectSwapExecuted`,
+  cancelled: `${OBJECT_SWAP_MODULE}::ObjectSwapCancelled`,
+  destroyed: `${OBJECT_SWAP_MODULE}::ObjectSwapDestroyed`,
 } as const;
 
 // ── JSON-RPC event helpers ──────────────────────────────────────────
+// Duplicated from useSwap.ts to keep this changeset self-contained.
 
 interface RpcEventCursor {
   txDigest: string;
@@ -98,69 +104,85 @@ async function rpcQueryAllEvents(eventType: string): Promise<RpcEvent[]> {
 
 // ── Object parsing helpers ──────────────────────────────────────────
 
+/**
+ * Extract an item ID from the JSON representation of `Option<T>`.
+ * Handles both string IDs and nested UID structures returned by the RPC.
+ */
+function parseOptionItem(raw: unknown): string | null {
+  if (raw == null) return null;
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object') {
+    const nested = raw as Record<string, unknown>;
+    const uid = nested.id;
+    if (uid && typeof uid === 'object') {
+      return ((uid as Record<string, unknown>).id as string) ?? null;
+    }
+    if (typeof uid === 'string') return uid;
+  }
+  return null;
+}
+
+/**
+ * Extract an object ID from the JSON representation of `Option<ID>`.
+ * ID in Sui JSON may appear as a plain hex string or `{ bytes: "0x…" }`.
+ */
+function parseOptionId(raw: unknown): string | null {
+  if (raw == null) return null;
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.bytes === 'string') return obj.bytes;
+  }
+  return null;
+}
+
 /** Map the gRPC object JSON representation into our domain model. */
-function parseSwapJson(
+function parseObjectSwapJson(
   objectId: string,
   objectType: string,
   json: Record<string, unknown> | null,
-): SwapObject | null {
+): ObjectSwapObject | null {
   if (!json) return null;
-  const [itemType = '', coinType = ''] = extractTypeParams(objectType);
-
-  // item is Option<T> — may be null, a string ID, or a nested UID struct
-  let item: string | null = null;
-  const raw = json.item;
-  if (raw != null) {
-    if (typeof raw === 'string') {
-      item = raw;
-    } else if (typeof raw === 'object') {
-      const nested = raw as Record<string, unknown>;
-      const uid = nested.id;
-      if (uid && typeof uid === 'object') {
-        item = ((uid as Record<string, unknown>).id as string) ?? null;
-      } else if (typeof uid === 'string') {
-        item = uid;
-      }
-    }
-  }
+  const [itemType = '', counterItemType = ''] =
+    extractTypeParams(objectType);
 
   return {
     id: objectId,
     creator: json.creator as string,
     recipient: json.recipient as string,
-    item,
-    requested_amount: String(json.requested_amount ?? '0'),
+    item: parseOptionItem(json.item),
+    requested_object_id: parseOptionId(json.requested_object_id),
     description: json.description as string,
     state: Number(json.state),
     created_at: Number(json.created_at),
     timeout_ms: Number(json.timeout_ms),
     item_type: itemType,
-    coin_type: coinType,
+    counter_item_type: counterItemType,
   };
 }
 
 /**
- * Reconstruct a minimal SwapObject from the creation event when the
- * on-chain object has already been destroyed.
+ * Reconstruct a minimal ObjectSwapObject from the creation event when
+ * the on-chain object has already been destroyed.
  */
-function swapFromCreationEvent(
+function objectSwapFromCreationEvent(
   swapId: string,
   ev: RpcEvent,
   state: number,
-): SwapObject {
+): ObjectSwapObject {
   const pj = ev.parsedJson;
   return {
     id: swapId,
     creator: pj.creator as string,
     recipient: pj.recipient as string,
     item: null,
-    requested_amount: String(pj.requested_amount ?? '0'),
+    requested_object_id: parseOptionId(pj.requested_object_id),
     description: pj.description as string,
     state,
     created_at: Number(pj.created_at ?? ev.timestampMs),
     timeout_ms: Number(pj.timeout_ms),
     item_type: '',
-    coin_type: '',
+    counter_item_type: '',
   };
 }
 
@@ -186,45 +208,52 @@ function inferTerminalState(
 
 // ── Transaction hooks ───────────────────────────────────────────────
 
-interface CreateSwapParams {
-  /** Move type tag of T — the asset the creator deposits (e.g. an NFT type). */
-  itemType: string;
-  /** Inner coin type the creator wants in return (e.g. `0x2::sui::SUI`). NOT `Coin<X>`. */
-  coinType: string;
+interface CreateObjectSwapParams {
+  /** Move type tag of T — the creator's deposited asset */
+  itemTypeTag: string;
+  /** Move type tag of U — the expected counter-asset type */
+  counterItemTypeTag: string;
+  /** Object ID of the creator's asset to deposit */
+  itemObjectId: string;
   recipient: string;
-  /** Minimum payment in the smallest unit (MIST for SUI). */
-  requestedAmount: bigint | string;
+  /** Specific object ID the recipient must provide; omit for "any U" */
+  requestedObjectId?: string;
   description: string;
   timeoutMs: number;
-  /** Object ID of the creator's asset to deposit. */
-  assetObjectId: string;
 }
 
 /**
- * Build & sign a `swap::create_swap` transaction.
+ * Build & sign an `object_swap::create_object_swap` transaction.
  *
- * TypeArguments: `[T, CoinType]` where T = creator's deposited asset,
- * CoinType = inner type of the Coin the creator expects (e.g. `0x2::sui::SUI`).
+ * TypeArguments: `[T, U]` where T = creator's deposited asset,
+ * U = expected counter-asset type (both `key + store`).
+ *
+ * `requestedObjectId` is BCS-encoded as `Option<ID>` — `Some(address)`
+ * when a specific object is required, `None` when any U is acceptable.
  */
-export function useCreateSwap() {
+export function useCreateObjectSwap() {
   const dAppKit = useDAppKit();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
   const execute = useCallback(
-    async (params: CreateSwapParams) => {
+    async (params: CreateObjectSwapParams) => {
       setLoading(true);
       setError(null);
       try {
         const tx = new Transaction();
 
         tx.moveCall({
-          target: `${SWAP_MODULE}::create_swap`,
-          typeArguments: [params.itemType, params.coinType],
+          target: `${OBJECT_SWAP_MODULE}::create_object_swap`,
+          typeArguments: [params.itemTypeTag, params.counterItemTypeTag],
           arguments: [
-            tx.object(params.assetObjectId),
+            tx.object(params.itemObjectId),
             tx.pure.address(params.recipient),
-            tx.pure.u64(params.requestedAmount),
+            tx.pure(
+              bcs
+                .option(bcs.Address)
+                .serialize(params.requestedObjectId ?? null),
+            ),
             tx.pure.string(params.description),
             tx.pure.u64(params.timeoutMs),
             tx.object(CLOCK_ID),
@@ -246,42 +275,41 @@ export function useCreateSwap() {
   return { execute, loading, error };
 }
 
-interface ExecuteSwapParams {
+interface ExecuteObjectSwapParams {
   swapObjectId: string;
-  /** Move type tag of T — the creator's deposited asset type. */
-  itemType: string;
-  /** Inner coin type (e.g. `0x2::sui::SUI`). NOT `Coin<X>`. */
-  coinType: string;
-  /** Payment amount in smallest unit (MIST for SUI). Must be >= swap's requested_amount. */
-  paymentAmount: bigint | string;
+  /** Move type tag of T — the creator's deposited asset */
+  creatorItemType: string;
+  /** Move type tag of U — the recipient's counter-asset */
+  counterItemType: string;
+  /** Object ID of the recipient's U-typed asset to deposit */
+  itemBObjectId: string;
 }
 
 /**
- * Build & sign a `swap::execute_swap` transaction.
+ * Build & sign an `object_swap::execute_object_swap` transaction.
  *
- * Recipient pays with Coin<CoinType>, completing the atomic exchange.
- * Hackathon scope: SUI-only — splits payment directly from gas coin.
+ * Recipient provides a concrete object of type U, completing
+ * the atomic NFT-for-NFT exchange.
  */
-export function useExecuteSwap() {
+export function useExecuteObjectSwap() {
   const dAppKit = useDAppKit();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
   const execute = useCallback(
-    async (params: ExecuteSwapParams) => {
+    async (params: ExecuteObjectSwapParams) => {
       setLoading(true);
       setError(null);
       try {
         const tx = new Transaction();
 
-        const [payment] = tx.splitCoins(tx.gas, [
-          tx.pure.u64(params.paymentAmount),
-        ]);
-
         tx.moveCall({
-          target: `${SWAP_MODULE}::execute_swap`,
-          typeArguments: [params.itemType, params.coinType],
-          arguments: [tx.object(params.swapObjectId), payment],
+          target: `${OBJECT_SWAP_MODULE}::execute_object_swap`,
+          typeArguments: [params.creatorItemType, params.counterItemType],
+          arguments: [
+            tx.object(params.swapObjectId),
+            tx.object(params.itemBObjectId),
+          ],
         });
 
         await dAppKit.signAndExecuteTransaction({ transaction: tx });
@@ -299,32 +327,32 @@ export function useExecuteSwap() {
   return { execute, loading, error };
 }
 
-interface SwapIdParams {
+interface ObjectSwapIdParams {
   swapObjectId: string;
-  /** Move type tag of T — the creator's deposited asset type. */
-  itemType: string;
-  /** Inner coin type (e.g. `0x2::sui::SUI`). NOT `Coin<X>`. */
-  coinType: string;
+  /** Move type tag of T */
+  creatorItemType: string;
+  /** Move type tag of U */
+  counterItemType: string;
 }
 
 /**
- * Build & sign a `swap::cancel_swap` transaction.
+ * Build & sign an `object_swap::cancel_object_swap` transaction.
  * Creator reclaims their asset after timeout. Requires Clock.
  */
-export function useCancelSwap() {
+export function useCancelObjectSwap() {
   const dAppKit = useDAppKit();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
   const execute = useCallback(
-    async (params: SwapIdParams) => {
+    async (params: ObjectSwapIdParams) => {
       setLoading(true);
       setError(null);
       try {
         const tx = new Transaction();
         tx.moveCall({
-          target: `${SWAP_MODULE}::cancel_swap`,
-          typeArguments: [params.itemType, params.coinType],
+          target: `${OBJECT_SWAP_MODULE}::cancel_object_swap`,
+          typeArguments: [params.creatorItemType, params.counterItemType],
           arguments: [tx.object(params.swapObjectId), tx.object(CLOCK_ID)],
         });
         await dAppKit.signAndExecuteTransaction({ transaction: tx });
@@ -343,24 +371,24 @@ export function useCancelSwap() {
 }
 
 /**
- * Build & sign a `swap::destroy_swap` transaction.
+ * Build & sign an `object_swap::destroy_object_swap` transaction.
  * Reclaims on-chain storage for a terminated (Executed / Cancelled) swap.
  * Consumes the shared object by value.
  */
-export function useDestroySwap() {
+export function useDestroyObjectSwap() {
   const dAppKit = useDAppKit();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
   const execute = useCallback(
-    async (params: SwapIdParams) => {
+    async (params: ObjectSwapIdParams) => {
       setLoading(true);
       setError(null);
       try {
         const tx = new Transaction();
         tx.moveCall({
-          target: `${SWAP_MODULE}::destroy_swap`,
-          typeArguments: [params.itemType, params.coinType],
+          target: `${OBJECT_SWAP_MODULE}::destroy_object_swap`,
+          typeArguments: [params.creatorItemType, params.counterItemType],
           arguments: [tx.object(params.swapObjectId)],
         });
         await dAppKit.signAndExecuteTransaction({ transaction: tx });
@@ -381,17 +409,14 @@ export function useDestroySwap() {
 // ── Data-fetching hooks ─────────────────────────────────────────────
 
 /**
- * Fetch all swaps where `address` is creator or recipient.
+ * Fetch all object swaps where `address` is creator or recipient.
  *
- * 1. Query SwapCreated events via JSON-RPC
- * 2. Filter by address matching creator or recipient
- * 3. Batch-fetch live object state via gRPC `getObjects`
- * 4. Query SwapExecuted / SwapCancelled for terminal-state tagging
- * 5. Gracefully handle destroyed objects via event-driven fallback
+ * Strategy mirrors useMySwaps: event-first discovery with live object
+ * enrichment, plus graceful fallback for destroyed objects.
  */
-export function useMySwaps(address: string | undefined) {
+export function useMyObjectSwaps(address: string | undefined) {
   const client = useCurrentClient();
-  const [data, setData] = useState<SwapObject[] | null>(null);
+  const [data, setData] = useState<ObjectSwapObject[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
@@ -438,7 +463,7 @@ export function useMySwaps(address: string | undefined) {
         cancelledEvs.map((e) => e.parsedJson.swap_id as string),
       );
 
-      const swaps: SwapObject[] = [];
+      const swaps: ObjectSwapObject[] = [];
       for (let i = 0; i < swapIds.length; i++) {
         const id = swapIds[i];
         const obj = objectsRes.objects[i];
@@ -448,7 +473,7 @@ export function useMySwaps(address: string | undefined) {
           const ev = mine.find((e) => e.parsedJson.swap_id === id);
           if (ev) {
             swaps.push(
-              swapFromCreationEvent(
+              objectSwapFromCreationEvent(
                 id,
                 ev,
                 inferTerminalState(id, executedIds, cancelledIds),
@@ -458,7 +483,7 @@ export function useMySwaps(address: string | undefined) {
           continue;
         }
 
-        const parsed = parseSwapJson(
+        const parsed = parseObjectSwapJson(
           obj.objectId,
           obj.type,
           obj.json ?? null,
@@ -482,16 +507,14 @@ export function useMySwaps(address: string | undefined) {
 }
 
 /**
- * Fetch a single Swap object together with all related events for timeline.
+ * Fetch a single ObjectSwap together with all related events for timeline.
  *
- * When the object has been destroyed (`getObject` throws), the hook
- * falls back to event-driven rendering: it reconstructs a partial
- * SwapObject from the creation event and infers terminal state from
- * executed / cancelled events.
+ * Falls back to event-driven reconstruction when the object has been
+ * destroyed (getObject throws).
  */
-export function useSwapDetail(swapId: string | undefined) {
+export function useObjectSwapDetail(swapId: string | undefined) {
   const client = useCurrentClient();
-  const [data, setData] = useState<SwapObject | null>(null);
+  const [data, setData] = useState<ObjectSwapObject | null>(null);
   const [events, setEvents] = useState<ChainEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -517,13 +540,13 @@ export function useSwapDetail(swapId: string | undefined) {
       setEvents(related.map(toChainEvent));
 
       // Try fetching the live object
-      let swap: SwapObject | null = null;
+      let swap: ObjectSwapObject | null = null;
       try {
         const res = await client.getObject({
           objectId: swapId,
           include: { json: true },
         });
-        swap = parseSwapJson(
+        swap = parseObjectSwapJson(
           res.object.objectId,
           res.object.type,
           res.object.json ?? null,
@@ -531,20 +554,20 @@ export function useSwapDetail(swapId: string | undefined) {
       } catch {
         // Object destroyed — fall back to event reconstruction
         const creationEv = related.find((ev) =>
-          ev.type.endsWith('::SwapCreated'),
+          ev.type.endsWith('::ObjectSwapCreated'),
         );
         if (creationEv) {
           const hasExecuted = related.some((ev) =>
-            ev.type.endsWith('::SwapExecuted'),
+            ev.type.endsWith('::ObjectSwapExecuted'),
           );
           const hasCancelled = related.some((ev) =>
-            ev.type.endsWith('::SwapCancelled'),
+            ev.type.endsWith('::ObjectSwapCancelled'),
           );
           let state = SWAP_STATE_PENDING;
           if (hasExecuted) state = SWAP_STATE_EXECUTED;
           else if (hasCancelled) state = SWAP_STATE_CANCELLED;
 
-          swap = swapFromCreationEvent(swapId, creationEv, state);
+          swap = objectSwapFromCreationEvent(swapId, creationEv, state);
         }
       }
 

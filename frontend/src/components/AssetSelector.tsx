@@ -25,6 +25,13 @@ interface AssetSelectorProps {
     type: string;
     display?: Record<string, string>;
   }) => void;
+  /**
+   * Controls which asset categories are visible.
+   * - `'nft-only'` — hides the Coin tab; used in Coin Swap mode where coin
+   *    selection is handled separately via a dropdown + amount input.
+   * - `'all'` (default) — shows both NFT and Coin tabs; used in Object Swap mode.
+   */
+  filterMode?: 'nft-only' | 'all';
 }
 
 type Tab = 'nft' | 'coin';
@@ -51,7 +58,7 @@ function assetDisplayName(asset: AssetInfo): string {
 // ── Component ──
 
 /** Asset picker for Create Swap — lists wallet-owned NFTs and Coins */
-export default function AssetSelector({ onSelect }: AssetSelectorProps) {
+export default function AssetSelector({ onSelect, filterMode = 'all' }: AssetSelectorProps) {
   const account = useCurrentAccount();
 
   const [assets, setAssets] = useState<AssetInfo[]>([]);
@@ -129,8 +136,12 @@ export default function AssetSelector({ onSelect }: AssetSelectorProps) {
 
   // ── Derived state ──
 
+  // In 'nft-only' mode the Coin tab is unavailable; lock to NFT regardless
+  // of internal tab state so the filter always excludes coins.
+  const effectiveTab: Tab = filterMode === 'nft-only' ? 'nft' : tab;
+
   const filtered = assets
-    .filter((a) => (tab === 'coin' ? isCoin(a.type) : !isCoin(a.type)))
+    .filter((a) => (effectiveTab === 'coin' ? isCoin(a.type) : !isCoin(a.type)))
     .filter((a) => {
       if (!search) return true;
       const q = search.toLowerCase();
@@ -141,7 +152,7 @@ export default function AssetSelector({ onSelect }: AssetSelectorProps) {
       );
     });
 
-  const categoryLabel = tab === 'nft' ? 'NFTs' : 'coins';
+  const categoryLabel = effectiveTab === 'nft' ? 'NFTs' : 'coins';
   const emptyMessage = search ? 'No matching assets.' : `No ${categoryLabel} found.`;
 
   type ViewState = 'loading' | 'empty' | 'results';
@@ -172,23 +183,25 @@ export default function AssetSelector({ onSelect }: AssetSelectorProps) {
 
   return (
     <div className="rounded-2xl border border-subtle bg-surface p-6">
-      {/* ── Tabs ── */}
-      <div className="mb-4 flex gap-2">
-        {(['nft', 'coin'] as const).map((t) => (
-          <button
-            key={t}
-            type="button"
-            onClick={() => setTab(t)}
-            className={`rounded-xl px-5 py-2 text-sm font-semibold transition-colors cursor-pointer ${
-              tab === t
-                ? 'gradient-primary text-white'
-                : 'bg-surface-soft text-text-secondary hover:text-text-primary'
-            }`}
-          >
-            {t === 'nft' ? 'NFT' : 'Coin'}
-          </button>
-        ))}
-      </div>
+      {/* ── Tabs (hidden in nft-only mode where coin selection is separate) ── */}
+      {filterMode === 'all' && (
+        <div className="mb-4 flex gap-2">
+          {(['nft', 'coin'] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setTab(t)}
+              className={`rounded-xl px-5 py-2 text-sm font-semibold transition-colors cursor-pointer ${
+                tab === t
+                  ? 'gradient-primary text-white'
+                  : 'bg-surface-soft text-text-secondary hover:text-text-primary'
+              }`}
+            >
+              {t === 'nft' ? 'NFT' : 'Coin'}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ── Search ── */}
       <input
@@ -222,7 +235,7 @@ export default function AssetSelector({ onSelect }: AssetSelectorProps) {
                 }`}
               >
                 {/* NFT thumbnail */}
-                {tab === 'nft' && asset.display?.image_url && (
+                {effectiveTab === 'nft' && asset.display?.image_url && (
                   <img
                     src={asset.display.image_url}
                     alt={assetDisplayName(asset)}
@@ -231,7 +244,7 @@ export default function AssetSelector({ onSelect }: AssetSelectorProps) {
                 )}
 
                 {/* Coin balance */}
-                {tab === 'coin' && asset.balance != null && (
+                {effectiveTab === 'coin' && asset.balance != null && (
                   <span className="font-display text-lg font-bold text-text-primary">
                     {asset.balance}
                   </span>

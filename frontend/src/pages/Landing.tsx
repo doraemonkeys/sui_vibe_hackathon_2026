@@ -32,7 +32,7 @@ const PRIMITIVES = [
     icon: '⚡',
     title: 'SWAP',
     description:
-      'On-chain verifiable? Execute atomic peer-to-peer swaps — zero trust, zero counterparty risk.',
+      'Atomic peer-to-peer swaps — NFT-for-Coin and NFT-for-NFT. Zero trust, zero counterparty risk.',
     link: '/swap/create',
     gradientClass: 'gradient-swap',
   },

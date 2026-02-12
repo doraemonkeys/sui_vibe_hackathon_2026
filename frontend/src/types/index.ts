@@ -22,18 +22,16 @@ export interface EscrowObject {
   disputed_at: number;
 }
 
-// ── Swap Object (mirrors on-chain Swap<T, phantom U> struct) ──
+// ── Swap Object (mirrors on-chain Swap<T, phantom CoinType> struct) ──
 
 export interface SwapObject {
   id: string;
   creator: string;
   recipient: string;
   /** Object ID of the creator's deposited asset, null after execute/cancel */
-  item_a: string | null;
-  /** Move type tag of T (creator's asset), extracted from object type */
-  item_a_type: string;
-  /** Move type tag of U (expected counter-asset), extracted from phantom param */
-  item_b_type: string;
+  item: string | null;
+  /** Minimum Coin<CoinType> the creator will accept (u64 serialized as string) */
+  requested_amount: string;
   description: string;
   /** Numeric state: 0=Pending, 1=Executed, 2=Cancelled */
   state: number;
@@ -41,6 +39,33 @@ export interface SwapObject {
   created_at: number;
   /** Duration in ms before creator can cancel */
   timeout_ms: number;
+  /** Move type tag of T (creator's asset), derived from object type string */
+  item_type: string;
+  /** Move type tag of CoinType (payment coin), derived from object type string */
+  coin_type: string;
+}
+
+// ── ObjectSwap Object (mirrors on-chain ObjectSwap<T, phantom U> struct) ──
+
+export interface ObjectSwapObject {
+  id: string;
+  creator: string;
+  recipient: string;
+  /** Object ID of the creator's deposited asset, null after execute/cancel */
+  item: string | null;
+  /** If set, recipient must provide this exact object; null = any object of type U */
+  requested_object_id: string | null;
+  description: string;
+  /** Numeric state: 0=Pending, 1=Executed, 2=Cancelled */
+  state: number;
+  /** Epoch-ms timestamp when the swap was created */
+  created_at: number;
+  /** Duration in ms before creator can cancel */
+  timeout_ms: number;
+  /** Move type tag of T (creator's asset), derived from object type string */
+  item_type: string;
+  /** Move type tag of U (counter-asset), derived from object type string */
+  counter_item_type: string;
 }
 
 // ── Escrow Events (match contract Move structs) ──
@@ -107,6 +132,7 @@ export interface SwapCreatedEvent {
   swap_id: string;
   creator: string;
   recipient: string;
+  requested_amount: string;
   description: string;
   timeout_ms: string;
   created_at: string;
@@ -116,16 +142,22 @@ export interface SwapExecutedEvent {
   swap_id: string;
   creator: string;
   recipient: string;
+  requested_amount: string;
+  amount_paid: string;
 }
 
 export interface SwapCancelledEvent {
   swap_id: string;
   creator: string;
+  recipient: string;
 }
 
 export interface SwapDestroyedEvent {
   swap_id: string;
+  creator: string;
+  recipient: string;
   destroyed_by: string;
+  final_state: string;
 }
 
 export type SwapEvent =
@@ -133,6 +165,42 @@ export type SwapEvent =
   | SwapExecutedEvent
   | SwapCancelledEvent
   | SwapDestroyedEvent;
+
+// ── ObjectSwap Events (match contract Move structs) ──
+
+export interface ObjectSwapCreatedEvent {
+  swap_id: string;
+  creator: string;
+  recipient: string;
+  requested_object_id: string | null;
+  description: string;
+  timeout_ms: string;
+  created_at: string;
+}
+
+export interface ObjectSwapExecutedEvent {
+  swap_id: string;
+  creator: string;
+  recipient: string;
+  item_a_id: string;
+  item_b_id: string;
+}
+
+export interface ObjectSwapCancelledEvent {
+  swap_id: string;
+  creator: string;
+}
+
+export interface ObjectSwapDestroyedEvent {
+  swap_id: string;
+  destroyed_by: string;
+}
+
+export type ObjectSwapEvent =
+  | ObjectSwapCreatedEvent
+  | ObjectSwapExecutedEvent
+  | ObjectSwapCancelledEvent
+  | ObjectSwapDestroyedEvent;
 
 // ── Shared Utilities ──
 

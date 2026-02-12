@@ -21,11 +21,14 @@ function formatTimestamp(epochMs: number): string {
 /**
  * Derive a human-readable label from a fully-qualified Move event type.
  * e.g. "0x…::escrow::EscrowCreated" → "Created"
+ *
+ * ObjectSwap must precede Swap in the alternation so that "ObjectSwapCreated"
+ * strips the full prefix rather than leaving "ObjectCreated".
  */
 function eventLabel(type: string): string {
   const segments = type.split('::');
   const raw = segments[segments.length - 1] ?? type;
-  return raw.replace(/^(Escrow|Swap|Arbiter)/, '');
+  return raw.replace(/^(Escrow|ObjectSwap|Swap|Arbiter)/, '');
 }
 
 // ── Animation variants ──

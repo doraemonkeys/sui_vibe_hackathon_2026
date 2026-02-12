@@ -1,5 +1,5 @@
 export const PACKAGE_ID =
-  '0xeb07c23fc18e231f4632e812961b939f3fd788dbae887e2470d8697a191085b6';
+  '0xf03f9338e341f9d3c58fdfeebc7c808c3dce7ce7f2b01a87dc7d3021b9a0967e';
 
 /** Sui shared Clock object */
 export const CLOCK_ID = '0x6';
