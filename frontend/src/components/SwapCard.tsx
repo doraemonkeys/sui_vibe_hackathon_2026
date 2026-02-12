@@ -10,10 +10,13 @@ function truncateAddress(addr: string): string {
   return `${addr.slice(0, 6)}\u2026${addr.slice(-4)}`;
 }
 
+/** Matches SUI Coin type regardless of address zero-padding (0x2 vs 0x000…002). */
+const SUI_COIN_RE = /::coin::Coin<0x0*2::sui::SUI>/;
+
 /** Extract a display-friendly short name from a fully-qualified Move type. */
 function shortType(type: string): string {
   if (!type) return 'Unknown';
-  if (type.includes('Coin<0x2::sui::SUI>')) return 'SUI';
+  if (SUI_COIN_RE.test(type)) return 'SUI';
   const open = type.indexOf('<');
   const base = open === -1 ? type : type.slice(0, open);
   const parts = base.split('::');

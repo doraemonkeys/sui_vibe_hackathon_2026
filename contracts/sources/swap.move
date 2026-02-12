@@ -1,11 +1,14 @@
-/// Trustless Atomic Swap module: A deposits T, B deposits U to atomically exchange.
-/// B's deposit and execution are merged into one step — B's asset never enters
+/// Coin-specialized Atomic Swap: A deposits item T, B pays Coin<CoinType> to atomically exchange.
+/// B's payment and execution are merged into one step — B's coin never enters
 /// a "locked but unexecuted" limbo, eliminating counterparty risk for B.
+/// The requested_amount field enforces a minimum price on-chain, closing the
+/// trustless gap that a generic phantom U could not cover for fungible assets.
 module gavel::swap;
 
 use std::string::String;
 use sui::event;
 use sui::clock::Clock;
+use sui::coin::Coin;
 
 // === State Constants ===
 
@@ -38,18 +41,25 @@ const ETimeoutTooShort: vector<u8> = b"Timeout must be at least MIN_TIMEOUT_MS";
 const ETimeoutTooLong: vector<u8> = b"Timeout must be at most MAX_TIMEOUT_MS";
 #[error]
 const EDescriptionTooLong: vector<u8> = b"Description exceeds MAX_DESCRIPTION_LEN";
+#[error]
+const EZeroAmount: vector<u8> = b"Requested amount must be greater than zero";
+#[error]
+const EInsufficientAmount: vector<u8> = b"Payment is less than the requested amount";
 
 // === Core Struct ===
 
-/// `phantom U` encodes the expected counter-asset type at the type level.
-/// Move enforces B provides exactly this type at execute_swap, without storing U on-chain.
-public struct Swap<T: key + store, phantom U: key + store> has key {
+/// `phantom CoinType` encodes the expected payment coin at the type level.
+/// Combined with `requested_amount`, the contract enforces both *what* coin
+/// and *how much* the recipient must pay — no bypass path exists.
+public struct Swap<T: key + store, phantom CoinType> has key {
     id: UID,
     creator: address,
     recipient: address,
     /// Creator's deposited asset.
     /// Invariant: Some when state == Pending; None after execute/cancel extracts it.
-    item_a: Option<T>,
+    item: Option<T>,
+    /// Minimum Coin<CoinType> the creator will accept.
+    requested_amount: u64,
     description: String,
     state: u8,
     created_at: u64,
@@ -62,6 +72,7 @@ public struct SwapCreated has copy, drop {
     swap_id: ID,
     creator: address,
     recipient: address,
+    requested_amount: u64,
     description: String,
     timeout_ms: u64,
     created_at: u64,
@@ -71,26 +82,32 @@ public struct SwapExecuted has copy, drop {
     swap_id: ID,
     creator: address,
     recipient: address,
+    requested_amount: u64,
+    amount_paid: u64,
 }
 
 public struct SwapCancelled has copy, drop {
     swap_id: ID,
     creator: address,
+    recipient: address,
 }
 
 public struct SwapDestroyed has copy, drop {
     swap_id: ID,
+    creator: address,
+    recipient: address,
     destroyed_by: address,
+    final_state: u8,
 }
 
 // === Entry Functions ===
 
-/// A creates a swap offer: deposits item_a, specifies who can fill and what type is expected.
-/// Validates: creator ≠ recipient, timeout ≥ MIN_TIMEOUT_MS, timeout ≤ MAX_TIMEOUT_MS,
-///            description ≤ MAX_DESCRIPTION_LEN.
-public fun create_swap<T: key + store, U: key + store>(
+/// Creator deposits an item and specifies the coin type and minimum amount expected.
+/// Validates: creator ≠ recipient, timeout in bounds, description length, amount > 0.
+public fun create_swap<T: key + store, CoinType>(
     item: T,
     recipient: address,
+    requested_amount: u64,
     description: String,
     timeout_ms: u64,
     clock: &Clock,
@@ -98,6 +115,7 @@ public fun create_swap<T: key + store, U: key + store>(
 ) {
     let creator = ctx.sender();
     assert!(creator != recipient, ECreatorIsRecipient);
+    assert!(requested_amount > 0, EZeroAmount);
     assert!(timeout_ms >= MIN_TIMEOUT_MS, ETimeoutTooShort);
     assert!(timeout_ms <= MAX_TIMEOUT_MS, ETimeoutTooLong);
     assert!(description.length() <= MAX_DESCRIPTION_LEN, EDescriptionTooLong);
@@ -106,11 +124,12 @@ public fun create_swap<T: key + store, U: key + store>(
     let swap_id = uid.to_inner();
     let created_at = clock.timestamp_ms();
 
-    let swap = Swap<T, U> {
+    let swap = Swap<T, CoinType> {
         id: uid,
         creator,
         recipient,
-        item_a: option::some(item),
+        item: option::some(item),
+        requested_amount,
         description,
         state: STATE_PENDING,
         created_at,
@@ -121,6 +140,7 @@ public fun create_swap<T: key + store, U: key + store>(
         swap_id,
         creator,
         recipient,
+        requested_amount,
         description,
         timeout_ms,
         created_at,
@@ -129,34 +149,38 @@ public fun create_swap<T: key + store, U: key + store>(
     transfer::share_object(swap);
 }
 
-/// B accepts the swap: deposits item_b of type U, atomically receives item_a of type T.
-/// Caller must be the designated recipient. State must be Pending.
+/// Recipient accepts the swap: pays Coin<CoinType> (≥ requested_amount),
+/// atomically receives the deposited item.
 /// Timeout does NOT block execution — by design, whoever gets ordered first by
 /// consensus wins the race between execute and cancel.
-public fun execute_swap<T: key + store, U: key + store>(
-    swap: &mut Swap<T, U>,
-    item_b: U,
+public fun execute_swap<T: key + store, CoinType>(
+    swap: &mut Swap<T, CoinType>,
+    payment: Coin<CoinType>,
     ctx: &TxContext,
 ) {
     assert!(swap.state == STATE_PENDING, EInvalidState);
     assert!(ctx.sender() == swap.recipient, ENotAuthorized);
+    assert!(payment.value() >= swap.requested_amount, EInsufficientAmount);
 
     swap.state = STATE_EXECUTED;
 
-    let item_a = swap.item_a.extract();
-    transfer::public_transfer(item_a, swap.recipient);
-    transfer::public_transfer(item_b, swap.creator);
+    let amount_paid = payment.value();
+    let item = swap.item.extract();
+    transfer::public_transfer(item, swap.recipient);
+    transfer::public_transfer(payment, swap.creator);
 
     event::emit(SwapExecuted {
         swap_id: swap.id.to_inner(),
         creator: swap.creator,
         recipient: swap.recipient,
+        requested_amount: swap.requested_amount,
+        amount_paid,
     });
 }
 
 /// Creator reclaims their asset after timeout. State must be Pending, clock must exceed deadline.
-public fun cancel_swap<T: key + store, U: key + store>(
-    swap: &mut Swap<T, U>,
+public fun cancel_swap<T: key + store, CoinType>(
+    swap: &mut Swap<T, CoinType>,
     clock: &Clock,
     ctx: &TxContext,
 ) {
@@ -169,19 +193,20 @@ public fun cancel_swap<T: key + store, U: key + store>(
 
     swap.state = STATE_CANCELLED;
 
-    let item_a = swap.item_a.extract();
-    transfer::public_transfer(item_a, swap.creator);
+    let item = swap.item.extract();
+    transfer::public_transfer(item, swap.creator);
 
     event::emit(SwapCancelled {
         swap_id: swap.id.to_inner(),
         creator: swap.creator,
+        recipient: swap.recipient,
     });
 }
 
 /// Destroy a terminal-state Swap, recovering on-chain storage.
 /// Callable by anyone; state must be Executed or Cancelled (item already extracted).
-public fun destroy_swap<T: key + store, U: key + store>(
-    swap: Swap<T, U>,
+public fun destroy_swap<T: key + store, CoinType>(
+    swap: Swap<T, CoinType>,
     ctx: &TxContext,
 ) {
     assert!(
@@ -191,23 +216,30 @@ public fun destroy_swap<T: key + store, U: key + store>(
 
     let swap_id = swap.id.to_inner();
     let destroyed_by = ctx.sender();
+    let final_state = swap.state;
+    let creator = swap.creator;
+    let recipient = swap.recipient;
 
     let Swap {
         id,
         creator: _,
         recipient: _,
-        item_a,
+        item,
+        requested_amount: _,
         description: _,
         state: _,
         created_at: _,
         timeout_ms: _,
     } = swap;
 
-    item_a.destroy_none();
+    item.destroy_none();
 
     event::emit(SwapDestroyed {
         swap_id,
+        creator,
+        recipient,
         destroyed_by,
+        final_state,
     });
 
     id.delete();
@@ -215,36 +247,44 @@ public fun destroy_swap<T: key + store, U: key + store>(
 
 // === View Functions ===
 
-public fun swap_id<T: key + store, U: key + store>(swap: &Swap<T, U>): ID {
+public fun swap_id<T: key + store, CoinType>(swap: &Swap<T, CoinType>): ID {
     swap.id.to_inner()
 }
 
-public fun creator<T: key + store, U: key + store>(swap: &Swap<T, U>): address {
+public fun creator<T: key + store, CoinType>(swap: &Swap<T, CoinType>): address {
     swap.creator
 }
 
-public fun recipient<T: key + store, U: key + store>(swap: &Swap<T, U>): address {
+public fun recipient<T: key + store, CoinType>(swap: &Swap<T, CoinType>): address {
     swap.recipient
 }
 
-public fun description<T: key + store, U: key + store>(swap: &Swap<T, U>): String {
+public fun requested_amount<T: key + store, CoinType>(swap: &Swap<T, CoinType>): u64 {
+    swap.requested_amount
+}
+
+public fun description<T: key + store, CoinType>(swap: &Swap<T, CoinType>): String {
     swap.description
 }
 
-public fun state<T: key + store, U: key + store>(swap: &Swap<T, U>): u8 {
+public fun state<T: key + store, CoinType>(swap: &Swap<T, CoinType>): u8 {
     swap.state
 }
 
-public fun created_at<T: key + store, U: key + store>(swap: &Swap<T, U>): u64 {
+public fun created_at<T: key + store, CoinType>(swap: &Swap<T, CoinType>): u64 {
     swap.created_at
 }
 
-public fun timeout_ms<T: key + store, U: key + store>(swap: &Swap<T, U>): u64 {
+public fun timeout_ms<T: key + store, CoinType>(swap: &Swap<T, CoinType>): u64 {
     swap.timeout_ms
 }
 
-public fun has_item_a<T: key + store, U: key + store>(swap: &Swap<T, U>): bool {
-    swap.item_a.is_some()
+public fun has_item<T: key + store, CoinType>(swap: &Swap<T, CoinType>): bool {
+    swap.item.is_some()
+}
+
+public fun deadline<T: key + store, CoinType>(swap: &Swap<T, CoinType>): u64 {
+    swap.created_at + swap.timeout_ms
 }
 
 // === Test Helpers ===
@@ -256,7 +296,7 @@ use sui::test_scenario as ts;
 #[test_only]
 use sui::clock;
 #[test_only]
-use sui::coin::{Self, Coin};
+use sui::coin;
 #[test_only]
 use sui::sui::SUI;
 
@@ -273,7 +313,7 @@ fun create_test_nft(value: u64, ctx: &mut TxContext): TestNFT {
 
 // === Unit Tests ===
 
-/// Happy path: create -> execute -> A gets NFT_B, B gets NFT_A
+/// Happy path: create -> recipient pays Coin<SUI> -> creator gets coin, recipient gets NFT
 #[test]
 fun test_happy_path() {
     let creator_addr = @0xA;
@@ -281,36 +321,40 @@ fun test_happy_path() {
     let mut scenario = ts::begin(creator_addr);
 
     let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
-    let nft_a = create_test_nft(1, ts::ctx(&mut scenario));
+    let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
-        nft_a,
+    create_swap<TestNFT, SUI>(
+        nft,
         recipient_addr,
-        string::utf8(b"Swap NFT A for NFT B"),
+        1000,
+        string::utf8(b"Swap NFT for 1000 MIST"),
         MIN_TIMEOUT_MS,
         &clock_obj,
         ts::ctx(&mut scenario),
     );
 
-    // Recipient executes the swap
+    // Recipient executes the swap with sufficient payment
     ts::next_tx(&mut scenario, recipient_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
-        let nft_b = create_test_nft(2, ts::ctx(&mut scenario));
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
 
-        // Verify initial state via view functions
         assert!(swap.state() == STATE_PENDING);
         assert!(swap.creator() == creator_addr);
         assert!(swap.recipient() == recipient_addr);
+        assert!(swap.requested_amount() == 1000);
         assert!(swap.timeout_ms() == MIN_TIMEOUT_MS);
+        assert!(swap.has_item() == true);
 
-        execute_swap(&mut swap, nft_b, ts::ctx(&mut scenario));
+        let payment = coin::mint_for_testing<SUI>(1000, ts::ctx(&mut scenario));
+        execute_swap(&mut swap, payment, ts::ctx(&mut scenario));
+
         assert!(swap.state() == STATE_EXECUTED);
+        assert!(swap.has_item() == false);
 
         ts::return_shared(swap);
     };
 
-    // Verify: recipient received NFT_A (value=1)
+    // Verify: recipient received the NFT
     ts::next_tx(&mut scenario, recipient_addr);
     {
         let nft = ts::take_from_sender<TestNFT>(&scenario);
@@ -318,19 +362,59 @@ fun test_happy_path() {
         ts::return_to_sender(&scenario, nft);
     };
 
-    // Verify: creator received NFT_B (value=2)
+    // Verify: creator received the Coin<SUI>
     ts::next_tx(&mut scenario, creator_addr);
     {
-        let nft = ts::take_from_sender<TestNFT>(&scenario);
-        assert!(nft.value == 2);
-        ts::return_to_sender(&scenario, nft);
+        let payment = ts::take_from_sender<Coin<SUI>>(&scenario);
+        assert!(payment.value() == 1000);
+        ts::return_to_sender(&scenario, payment);
     };
 
     clock::destroy_for_testing(clock_obj);
     ts::end(scenario);
 }
 
-/// Timeout path: create -> advance clock past timeout -> cancel -> A gets NFT back
+/// Overpayment: recipient pays more than requested — full amount goes to creator
+#[test]
+fun test_overpayment() {
+    let creator_addr = @0xA;
+    let recipient_addr = @0xB;
+    let mut scenario = ts::begin(creator_addr);
+
+    let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
+    let nft = create_test_nft(7, ts::ctx(&mut scenario));
+
+    create_swap<TestNFT, SUI>(
+        nft,
+        recipient_addr,
+        500,
+        string::utf8(b"NFT for >= 500 MIST"),
+        MIN_TIMEOUT_MS,
+        &clock_obj,
+        ts::ctx(&mut scenario),
+    );
+
+    ts::next_tx(&mut scenario, recipient_addr);
+    {
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        let payment = coin::mint_for_testing<SUI>(2000, ts::ctx(&mut scenario));
+        execute_swap(&mut swap, payment, ts::ctx(&mut scenario));
+        ts::return_shared(swap);
+    };
+
+    // Creator receives the full overpayment
+    ts::next_tx(&mut scenario, creator_addr);
+    {
+        let payment = ts::take_from_sender<Coin<SUI>>(&scenario);
+        assert!(payment.value() == 2000);
+        ts::return_to_sender(&scenario, payment);
+    };
+
+    clock::destroy_for_testing(clock_obj);
+    ts::end(scenario);
+}
+
+/// Timeout path: create -> advance clock past timeout -> cancel -> creator gets NFT back
 #[test]
 fun test_timeout_path() {
     let creator_addr = @0xA;
@@ -340,9 +424,10 @@ fun test_timeout_path() {
     let mut clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(42, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"test swap"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -355,7 +440,7 @@ fun test_timeout_path() {
     // Creator cancels
     ts::next_tx(&mut scenario, creator_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
         cancel_swap(&mut swap, &clock_obj, ts::ctx(&mut scenario));
         assert!(swap.state() == STATE_CANCELLED);
         ts::return_shared(swap);
@@ -373,49 +458,60 @@ fun test_timeout_path() {
     ts::end(scenario);
 }
 
-/// Mixed types: create_swap<NFT, Coin<SUI>> -> execute with Coin -> cross-type swap
+/// Error: payment below requested_amount
 #[test]
-fun test_mixed_types() {
+#[expected_failure(abort_code = EInsufficientAmount)]
+fun test_execute_swap_insufficient_amount() {
     let creator_addr = @0xA;
     let recipient_addr = @0xB;
     let mut scenario = ts::begin(creator_addr);
 
     let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
-    let nft = create_test_nft(42, ts::ctx(&mut scenario));
+    let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, Coin<SUI>>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"NFT for 1000 MIST"),
         MIN_TIMEOUT_MS,
         &clock_obj,
         ts::ctx(&mut scenario),
     );
 
-    // Recipient deposits Coin<SUI>
+    // Recipient tries to pay less than requested
     ts::next_tx(&mut scenario, recipient_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, Coin<SUI>>>(&scenario);
-        let payment = coin::mint_for_testing<SUI>(1000, ts::ctx(&mut scenario));
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        let payment = coin::mint_for_testing<SUI>(999, ts::ctx(&mut scenario));
         execute_swap(&mut swap, payment, ts::ctx(&mut scenario));
         ts::return_shared(swap);
     };
 
-    // Verify: recipient got NFT
-    ts::next_tx(&mut scenario, recipient_addr);
-    {
-        let nft = ts::take_from_sender<TestNFT>(&scenario);
-        assert!(nft.value == 42);
-        ts::return_to_sender(&scenario, nft);
-    };
+    clock::destroy_for_testing(clock_obj);
+    ts::end(scenario);
+}
 
-    // Verify: creator got Coin<SUI>
-    ts::next_tx(&mut scenario, creator_addr);
-    {
-        let payment = ts::take_from_sender<Coin<SUI>>(&scenario);
-        assert!(payment.value() == 1000);
-        ts::return_to_sender(&scenario, payment);
-    };
+/// Error: requested_amount is zero
+#[test]
+#[expected_failure(abort_code = EZeroAmount)]
+fun test_create_swap_zero_amount() {
+    let creator_addr = @0xA;
+    let recipient_addr = @0xB;
+    let mut scenario = ts::begin(creator_addr);
+
+    let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
+    let nft = create_test_nft(1, ts::ctx(&mut scenario));
+
+    create_swap<TestNFT, SUI>(
+        nft,
+        recipient_addr,
+        0,
+        string::utf8(b"free?"),
+        MIN_TIMEOUT_MS,
+        &clock_obj,
+        ts::ctx(&mut scenario),
+    );
 
     clock::destroy_for_testing(clock_obj);
     ts::end(scenario);
@@ -433,9 +529,10 @@ fun test_error_unauthorized_execute() {
     let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -445,9 +542,9 @@ fun test_error_unauthorized_execute() {
     // Unauthorized user tries to execute
     ts::next_tx(&mut scenario, unauthorized);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
-        let nft_b = create_test_nft(2, ts::ctx(&mut scenario));
-        execute_swap(&mut swap, nft_b, ts::ctx(&mut scenario));
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        let payment = coin::mint_for_testing<SUI>(1000, ts::ctx(&mut scenario));
+        execute_swap(&mut swap, payment, ts::ctx(&mut scenario));
         ts::return_shared(swap);
     };
 
@@ -466,9 +563,10 @@ fun test_error_wrong_state() {
     let mut clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -479,7 +577,7 @@ fun test_error_wrong_state() {
     clock::increment_for_testing(&mut clock_obj, MIN_TIMEOUT_MS);
     ts::next_tx(&mut scenario, creator_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
         cancel_swap(&mut swap, &clock_obj, ts::ctx(&mut scenario));
         ts::return_shared(swap);
     };
@@ -487,9 +585,9 @@ fun test_error_wrong_state() {
     // Attempt execute on the now-Cancelled swap
     ts::next_tx(&mut scenario, recipient_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
-        let nft_b = create_test_nft(2, ts::ctx(&mut scenario));
-        execute_swap(&mut swap, nft_b, ts::ctx(&mut scenario));
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        let payment = coin::mint_for_testing<SUI>(1000, ts::ctx(&mut scenario));
+        execute_swap(&mut swap, payment, ts::ctx(&mut scenario));
         ts::return_shared(swap);
     };
 
@@ -508,9 +606,10 @@ fun test_error_timeout_not_reached() {
     let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -520,7 +619,7 @@ fun test_error_timeout_not_reached() {
     // Try to cancel immediately without advancing clock
     ts::next_tx(&mut scenario, creator_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
         cancel_swap(&mut swap, &clock_obj, ts::ctx(&mut scenario));
         ts::return_shared(swap);
     };
@@ -539,9 +638,10 @@ fun test_error_creator_is_recipient() {
     let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         creator_addr, // same as sender — should abort
+        1000,
         string::utf8(b"self-swap"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -560,11 +660,12 @@ fun test_timeout_race_execute_succeeds() {
     let mut scenario = ts::begin(creator_addr);
 
     let mut clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
-    let nft_a = create_test_nft(1, ts::ctx(&mut scenario));
+    let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
-        nft_a,
+    create_swap<TestNFT, SUI>(
+        nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -576,9 +677,9 @@ fun test_timeout_race_execute_succeeds() {
 
     ts::next_tx(&mut scenario, recipient_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
-        let nft_b = create_test_nft(2, ts::ctx(&mut scenario));
-        execute_swap(&mut swap, nft_b, ts::ctx(&mut scenario));
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        let payment = coin::mint_for_testing<SUI>(1000, ts::ctx(&mut scenario));
+        execute_swap(&mut swap, payment, ts::ctx(&mut scenario));
         assert!(swap.state() == STATE_EXECUTED);
         ts::return_shared(swap);
     };
@@ -596,11 +697,12 @@ fun test_timeout_race_cancel_after_execute() {
     let mut scenario = ts::begin(creator_addr);
 
     let mut clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
-    let nft_a = create_test_nft(1, ts::ctx(&mut scenario));
+    let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
-        nft_a,
+    create_swap<TestNFT, SUI>(
+        nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -610,9 +712,9 @@ fun test_timeout_race_cancel_after_execute() {
     // Recipient executes first
     ts::next_tx(&mut scenario, recipient_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
-        let nft_b = create_test_nft(2, ts::ctx(&mut scenario));
-        execute_swap(&mut swap, nft_b, ts::ctx(&mut scenario));
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        let payment = coin::mint_for_testing<SUI>(1000, ts::ctx(&mut scenario));
+        execute_swap(&mut swap, payment, ts::ctx(&mut scenario));
         ts::return_shared(swap);
     };
 
@@ -620,7 +722,7 @@ fun test_timeout_race_cancel_after_execute() {
     clock::increment_for_testing(&mut clock_obj, MIN_TIMEOUT_MS + 1);
     ts::next_tx(&mut scenario, creator_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
         cancel_swap(&mut swap, &clock_obj, ts::ctx(&mut scenario));
         ts::return_shared(swap);
     };
@@ -637,11 +739,12 @@ fun test_destroy_executed() {
     let mut scenario = ts::begin(creator_addr);
 
     let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
-    let nft_a = create_test_nft(1, ts::ctx(&mut scenario));
+    let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
-        nft_a,
+    create_swap<TestNFT, SUI>(
+        nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -651,16 +754,16 @@ fun test_destroy_executed() {
     // Execute
     ts::next_tx(&mut scenario, recipient_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
-        let nft_b = create_test_nft(2, ts::ctx(&mut scenario));
-        execute_swap(&mut swap, nft_b, ts::ctx(&mut scenario));
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        let payment = coin::mint_for_testing<SUI>(1000, ts::ctx(&mut scenario));
+        execute_swap(&mut swap, payment, ts::ctx(&mut scenario));
         ts::return_shared(swap);
     };
 
     // Destroy — callable by anyone
     ts::next_tx(&mut scenario, @0xC);
     {
-        let swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
+        let swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
         destroy_swap(swap, ts::ctx(&mut scenario));
     };
 
@@ -678,9 +781,10 @@ fun test_destroy_cancelled() {
     let mut clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -691,7 +795,7 @@ fun test_destroy_cancelled() {
     clock::increment_for_testing(&mut clock_obj, MIN_TIMEOUT_MS);
     ts::next_tx(&mut scenario, creator_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
         cancel_swap(&mut swap, &clock_obj, ts::ctx(&mut scenario));
         ts::return_shared(swap);
     };
@@ -699,7 +803,7 @@ fun test_destroy_cancelled() {
     // Destroy — callable by anyone
     ts::next_tx(&mut scenario, @0xC);
     {
-        let swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
+        let swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
         destroy_swap(swap, ts::ctx(&mut scenario));
     };
 
@@ -718,9 +822,10 @@ fun test_destroy_pending_fails() {
     let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -730,7 +835,7 @@ fun test_destroy_pending_fails() {
     // Try to destroy while still Pending
     ts::next_tx(&mut scenario, @0xC);
     {
-        let swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
+        let swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
         destroy_swap(swap, ts::ctx(&mut scenario));
     };
 
@@ -749,9 +854,10 @@ fun test_error_timeout_too_short() {
     let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS - 1,
         &clock_obj,
@@ -773,9 +879,10 @@ fun test_error_timeout_too_long() {
     let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MAX_TIMEOUT_MS + 1,
         &clock_obj,
@@ -805,9 +912,10 @@ fun test_error_description_too_long() {
         i = i + 1;
     };
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(desc),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -829,9 +937,10 @@ fun test_error_unauthorized_cancel() {
     let mut clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -844,8 +953,125 @@ fun test_error_unauthorized_cancel() {
     // Recipient tries to cancel — should fail with ENotAuthorized
     ts::next_tx(&mut scenario, recipient_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
         cancel_swap(&mut swap, &clock_obj, ts::ctx(&mut scenario));
+        ts::return_shared(swap);
+    };
+
+    clock::destroy_for_testing(clock_obj);
+    ts::end(scenario);
+}
+
+/// Error: double-execute — execute on an already-Executed swap
+#[test]
+#[expected_failure(abort_code = EInvalidState)]
+fun test_execute_swap_already_executed() {
+    let creator_addr = @0xA;
+    let recipient_addr = @0xB;
+    let mut scenario = ts::begin(creator_addr);
+
+    let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
+    let nft = create_test_nft(1, ts::ctx(&mut scenario));
+
+    create_swap<TestNFT, SUI>(
+        nft,
+        recipient_addr,
+        1000,
+        string::utf8(b"test"),
+        MIN_TIMEOUT_MS,
+        &clock_obj,
+        ts::ctx(&mut scenario),
+    );
+
+    // Execute first time
+    ts::next_tx(&mut scenario, recipient_addr);
+    {
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        let payment = coin::mint_for_testing<SUI>(1000, ts::ctx(&mut scenario));
+        execute_swap(&mut swap, payment, ts::ctx(&mut scenario));
+        ts::return_shared(swap);
+    };
+
+    // Attempt second execution — should fail with EInvalidState
+    ts::next_tx(&mut scenario, recipient_addr);
+    {
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        let payment = coin::mint_for_testing<SUI>(1000, ts::ctx(&mut scenario));
+        execute_swap(&mut swap, payment, ts::ctx(&mut scenario));
+        ts::return_shared(swap);
+    };
+
+    clock::destroy_for_testing(clock_obj);
+    ts::end(scenario);
+}
+
+/// Error: double-cancel — cancel on an already-Cancelled swap
+#[test]
+#[expected_failure(abort_code = EInvalidState)]
+fun test_cancel_swap_already_cancelled() {
+    let creator_addr = @0xA;
+    let recipient_addr = @0xB;
+    let mut scenario = ts::begin(creator_addr);
+
+    let mut clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
+    let nft = create_test_nft(1, ts::ctx(&mut scenario));
+
+    create_swap<TestNFT, SUI>(
+        nft,
+        recipient_addr,
+        1000,
+        string::utf8(b"test"),
+        MIN_TIMEOUT_MS,
+        &clock_obj,
+        ts::ctx(&mut scenario),
+    );
+
+    // Cancel first time
+    clock::increment_for_testing(&mut clock_obj, MIN_TIMEOUT_MS);
+    ts::next_tx(&mut scenario, creator_addr);
+    {
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        cancel_swap(&mut swap, &clock_obj, ts::ctx(&mut scenario));
+        ts::return_shared(swap);
+    };
+
+    // Attempt second cancellation — should fail with EInvalidState
+    ts::next_tx(&mut scenario, creator_addr);
+    {
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        cancel_swap(&mut swap, &clock_obj, ts::ctx(&mut scenario));
+        ts::return_shared(swap);
+    };
+
+    clock::destroy_for_testing(clock_obj);
+    ts::end(scenario);
+}
+
+/// Boundary: create_swap with exactly MAX_TIMEOUT_MS succeeds
+#[test]
+fun test_create_swap_max_timeout() {
+    let creator_addr = @0xA;
+    let recipient_addr = @0xB;
+    let mut scenario = ts::begin(creator_addr);
+
+    let clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
+    let nft = create_test_nft(1, ts::ctx(&mut scenario));
+
+    create_swap<TestNFT, SUI>(
+        nft,
+        recipient_addr,
+        1000,
+        string::utf8(b"max timeout"),
+        MAX_TIMEOUT_MS,
+        &clock_obj,
+        ts::ctx(&mut scenario),
+    );
+
+    // Verify the swap was created with the correct timeout
+    ts::next_tx(&mut scenario, creator_addr);
+    {
+        let swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
+        assert!(swap.timeout_ms() == MAX_TIMEOUT_MS);
         ts::return_shared(swap);
     };
 
@@ -864,9 +1090,10 @@ fun test_error_timeout_boundary_one_ms_before() {
     let mut clock_obj = clock::create_for_testing(ts::ctx(&mut scenario));
     let nft = create_test_nft(1, ts::ctx(&mut scenario));
 
-    create_swap<TestNFT, TestNFT>(
+    create_swap<TestNFT, SUI>(
         nft,
         recipient_addr,
+        1000,
         string::utf8(b"test"),
         MIN_TIMEOUT_MS,
         &clock_obj,
@@ -878,7 +1105,7 @@ fun test_error_timeout_boundary_one_ms_before() {
 
     ts::next_tx(&mut scenario, creator_addr);
     {
-        let mut swap = ts::take_shared<Swap<TestNFT, TestNFT>>(&scenario);
+        let mut swap = ts::take_shared<Swap<TestNFT, SUI>>(&scenario);
         cancel_swap(&mut swap, &clock_obj, ts::ctx(&mut scenario));
         ts::return_shared(swap);
     };

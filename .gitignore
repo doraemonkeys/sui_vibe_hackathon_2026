@@ -55,3 +55,4 @@ review_agent.md
 .cursor
 contracts/build
 .pnpm-store
+sites-config.yaml
