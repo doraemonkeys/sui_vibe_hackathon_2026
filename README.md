@@ -1,14 +1,14 @@
 # Gavel - Trustless P2P Exchange on Sui
 
-A peer-to-peer trading platform on Sui blockchain providing trustless escrow and atomic swap primitives. Users can securely exchange coins, NFTs, and arbitrary on-chain objects without intermediaries.
+A peer-to-peer trading platform on Sui blockchain providing trustless escrow and atomic swap primitives. Swaps are fully intermediary-free; escrows use a designated arbiter only for dispute resolution, with timelock fallback guaranteeing asset recovery.
 
 **Track:** Sui Track
 
 ## Features
 
-- **Escrow** - Three-party arbitrated transactions with mutual confirmation, dispute resolution, and timelock refund
-- **Coin Swap** - Atomic peer-to-peer coin-for-asset exchanges with on-chain price enforcement
-- **Object Swap** - Atomic NFT-for-NFT or object-for-object exchanges
+- **Escrow** - Three-party arbitrated transactions with mutual confirmation, recipient reject, dispute resolution, and timelock refund
+- **Coin Swap** - Atomic coin-for-asset exchanges with `phantom CoinType` type-level enforcement and on-chain minimum price
+- **Object Swap** - Atomic object-for-object exchanges with optional exact object ID targeting
 - **Role-based UI** - Context-aware actions based on user role (creator, recipient, arbiter)
 - **On-chain event timeline** - Full transaction history reconstructed from chain events
 
@@ -106,27 +106,34 @@ All contracts are written in **Move 2024** syntax and deployed on **Sui Testnet*
 
 ### Escrow (`gavel::escrow`)
 
-Single-direction escrow with three-party arbitration.
+Single-direction asset escrow with three-party arbitration. `Escrow<T: key + store>` supports any asset type.
 
-- **Parties:** Creator, Recipient, Arbiter
-- **Flow:** Active → Disputed → Released / Refunded → Destroyed
-- **Features:** Mutual confirmation (auto-releases when both confirm), arbiter dispute resolution, timelock refund after timeout
-- **Generic:** `Escrow<T: key + store>` supports any asset type
+- **Parties:** Creator (depositor), Recipient (beneficiary), Arbiter (dispute resolver)
+- **Flow:** Active → Released / Refunded / Disputed → Destroyed
+- **Mutual Confirm:** Creator and Recipient both confirm → auto-release asset to Recipient
+- **Recipient Reject:** Recipient voluntarily declines → asset refunded to Creator
+- **Dispute:** Either party (who hasn't confirmed) raises dispute → Arbiter resolves: release to Recipient or refund to Creator
+- **Dispute Timeout Fallback:** If Arbiter is unreachable, Creator can reclaim after `DISPUTE_TIMEOUT_MS` (30 days)
+- **Timelock Refund:** Creator reclaims asset after `timeout_ms` if no confirmation
+- **Confirm-then-Dispute Prevention:** A party who has confirmed cannot dispute
 
 ### Coin Swap (`gavel::swap`)
 
-Atomic coin-for-asset exchange with on-chain price enforcement.
+Atomic coin-for-asset exchange. `Swap<T: key + store, phantom CoinType>` encodes both the deposited asset type and the expected payment coin at the type level.
 
 - **Flow:** Pending → Executed / Cancelled → Destroyed
-- **Innovation:** Recipient's payment and execution merged into one atomic step — no "locked but unexecuted" limbo
-- **Type-safe:** `phantom CoinType` encodes expected payment coin at the type level; `requested_amount` enforces minimum price on-chain
+- **Atomic Execution:** Recipient's payment and asset receipt happen in one transaction — no "locked but unexecuted" limbo
+- **On-chain Price:** `requested_amount` enforces minimum price on-chain; overpayment is accepted (full amount goes to Creator)
+- **Timeout Race:** `execute_swap` has no clock check — consensus ordering decides the race between execute and cancel
 
 ### Object Swap (`gavel::object_swap`)
 
-Atomic object-for-object exchange (NFT-for-NFT).
+Atomic object-for-object exchange. `ObjectSwap<T: key + store, phantom U: key + store>` encodes both sides' object types at the type level.
 
 - **Flow:** Pending → Executed / Cancelled → Destroyed
-- **Flexible matching:** Optional `requested_object_id` allows exact object targeting or accepting any object of the specified type
+- **Exact Match:** Optional `requested_object_id` enforces the Recipient must provide a specific object
+- **Open Match:** When `requested_object_id` is None, any object of type U satisfies the swap
+- **Timeout Race:** Same consensus-ordering semantics as Coin Swap
 
 ### Deployed Addresses (Testnet)
 
@@ -174,19 +181,23 @@ A three-party mechanism involving a **Creator**, **Recipient**, and **Arbiter**.
 
 1. **Create** - Creator deposits an asset, specifies recipient, arbiter, description, and timeout
 2. **Confirm** - Both parties confirm to auto-release the asset to recipient
-3. **Dispute** - Either party can raise a dispute if there's a disagreement
-4. **Resolve** - Arbiter decides: release to recipient or refund to creator
-5. **Timelock Refund** - Creator reclaims the asset after timeout if not confirmed
+3. **Reject** - Recipient voluntarily declines, asset refunded to creator
+4. **Dispute** - Either party (who hasn't confirmed) raises a dispute
+5. **Resolve** - Arbiter decides: release to recipient or refund to creator
+6. **Timelock Refund** - Creator reclaims the asset after timeout (or after dispute timeout if arbiter is unreachable)
 
 ```
 Creator deposits asset
         │
    ┌────▼────┐
-   │  Active  │──── Both Confirm ───→ Released (to Recipient)
+   │  Active  │──── Both Confirm ────────→ Released (to Recipient)
+   │         │──── Recipient Reject ────→ Refunded (to Creator)
+   │         │──── Creator Timelock ────→ Refunded (to Creator)
    └────┬────┘
         │ Dispute
    ┌────▼─────┐
-   │ Disputed  │──── Arbiter ───→ Released or Refunded
+   │ Disputed  │──── Arbiter Resolve ───→ Released or Refunded
+   │          │──── Dispute Timeout ───→ Refunded (to Creator)
    └──────────┘
 ```
 
