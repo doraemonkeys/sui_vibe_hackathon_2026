@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { NavLink } from 'react-router-dom';
-import {
-  ConnectModal,
-  useCurrentAccount,
-  useDAppKit,
-} from '@mysten/dapp-kit-react';
+import { useCurrentAccount, useDAppKit } from '@mysten/dapp-kit-react';
+import { ConnectModal } from '@mysten/dapp-kit-react/ui';
 
 const NAV_LINKS = [
   { to: '/escrows', label: 'Escrow' },
